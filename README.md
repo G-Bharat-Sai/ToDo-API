@@ -241,3 +241,45 @@ All endpoints, viewable and testable at `http://localhost:3000/docs`:
 ## A note on in-memory storage
 
 Restarting the server resets `tasks` back to the original 3 example items — any tasks created, updated, or deleted during a session are lost. This is a deliberate limitation at this stage of the project; persistent storage (a database) is planned for the following stage of the assignment.
+
+## AI vs me
+
+### My prompt
+
+> Build a REST API for a to-do list using Node.js with Express.
+>
+> Endpoints:
+> - GET /tasks → Returns the entire list of tasks with a 200 OK status code.
+> - GET /tasks/:id → Returns a single task by its ID. If not found, returns 404 with a JSON error message.
+> - POST /tasks → Accepts a JSON body with a title. Generates the next free ID, sets done to false, adds it to the list, returns the created task with 201 Created.
+> - PUT /tasks/:id → Replaces a task's title and/or done status. Returns 200 OK, or 404 if the ID doesn't exist.
+> - DELETE /tasks/:id → Removes the task, returns 204 No Content, or 404 if the ID doesn't exist.
+>
+> Validation: For POST and PUT, if title is missing or empty, return 400 Bad Request with a JSON error message.
+>
+> Data storage: In-memory list with 3 pre-filled example tasks. Each task has id (number), title (text), done (boolean).
+>
+> Also add: Swagger UI at /docs.
+
+### What the AI did well
+
+The AI correctly implemented all five CRUD endpoints exactly as specified, with matching status codes (200, 201, 400, 404) and correct in-memory storage. Validation logic for empty/missing titles worked identically to my own implementation. I understand its code well enough to explain every line — it follows the same lookup → validate → act → respond pattern I used.
+
+### What it got wrong or silently decided
+
+I tested all five endpoint types against the AI's version (GET /tasks, GET /tasks/:id, POST /tasks, PUT /tasks/:id, DELETE /tasks/:id) and it matched my own API's behavior in every case — correct status codes (200, 201, 400, 204) and correct JSON bodies.
+
+- **No `GET /` or `GET /health` routes.** `curl -i http://localhost:3000/` returns Express's default `404 Cannot GET /` instead of a JSON API description. Not a mistake by the AI — my prompt never mentioned these endpoints, so it had no basis to build them.
+- **Id generation strategy differs.** My prompt said "generates the next free ID" without specifying *how*. The AI used a separate incrementing counter (`let nextId = 4`), while I calculate it from the array itself (`Math.max(...tasks.map(t => t.id)) + 1`). Both worked for the tests I ran, but a counter can drift out of sync with the actual data over time; deriving from the array cannot.
+- **Delete implementation differs.** The AI used `tasks.splice(index, 1)`, I used `tasks.filter(t => t.id !== id)` — different technique, identical observable result (confirmed: both return 204 with an empty body).
+
+### What my prompt forgot to specify
+
+- The `GET /` and `/health` endpoints entirely — a real gap, not a stylistic choice.
+- Exactly how "next free ID" should be calculated — the AI made its own reasonable choice (a counter) rather than deriving it from the data.
+- Whether Swagger's spec should live in a separate `openapi.json` file or be defined inline — the AI chose to inline it directly in `server.js`; I kept it in a separate file.
+- Exact wording for error messages — mine says `"title is required"`, the AI's says `"Title is required and cannot be empty"`. Functionally identical, but a stricter prompt would have specified exact text if that mattered.
+
+### One rematch
+
+I rewrote the prompt to explicitly specify the `GET /` and `GET /health` endpoints (with their exact response bodies) and to require the id-generation logic to derive from the existing array rather than use a separate counter. Both gaps were a direct result of my original prompt's omissions, not AI error — a more complete specification should produce a more complete API, confirming the assignment's core lesson: an AI's output is exactly as good as your spec.
