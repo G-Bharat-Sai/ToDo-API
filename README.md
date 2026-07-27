@@ -2,36 +2,36 @@
 
 A small CRUD API for managing a to-do list, built with **Node.js** and **Express**. Data now lives in a **SQLite database** (`tasks.db`) instead of a JavaScript array — a single file on disk that's created automatically the first time the server runs, and survives a restart.
 
-> This started as an in-memory API in Assignment 1. This is the Assignment 2 update: same endpoints, same request/response shapes, but the storage underneath moved from an array in memory to a real database file.
+> This started as an in-memory API in Assignment 1. Assignment 2 moved storage to SQLite. Assignment 3 (BE-04) moves it again, to Postgres running in Docker — see that section near the bottom.
 
 ## What this project does
 
 Full CRUD (Create, Read, Update, Delete) on a list of tasks. Each task has:
 
-- `id` (number) — assigned automatically by SQLite, not by me
+- `id` (number) — assigned automatically by the database, not by the app
 - `title` (string) — required, can't be empty
-- `done` (boolean) — defaults to `false` on create; stored as `0`/`1` in the actual database since SQLite doesn't have a real boolean type, and converted back to `true`/`false` before it ever reaches the client
+- `done` (boolean) — defaults to `false` on create
 
 ## Tech stack
 
-- **Node.js** — needs to be 22.13+ or 23.4+, explained below
-- **Express** — same as A1, handles routing and requests
-- **node:sqlite** — Node's own built-in SQLite module. No npm package for the database at all.
-- **swagger-ui-express** — interactive docs at `/docs`, unchanged from A1
+- **Node.js** — needs to be 22.13+ or 23.4+ (for `node:sqlite`)
+- **Express** — handles routing and requests
+- **node:sqlite** — Node's own built-in SQLite module, used in local/SQLite mode
+- **pg** — Postgres driver, used when running against Docker/Postgres (see BE-04 section)
+- **Docker + Docker Compose** — runs Postgres, and optionally the app itself, in containers
+- **swagger-ui-express** — interactive docs at `/docs`
 
 ## Why SQLite (and why `node:sqlite` specifically)
 
-The assignment wanted SQLite because it's a single file, needs no server process, and gets the persistence problem solved with basically zero setup. That part was straightforward to agree with.
+The A2 assignment wanted SQLite because it's a single file, needs no server process, and gets the persistence problem solved with basically zero setup.
 
-What wasn't straightforward: I originally tried the `better-sqlite3` npm package, which is what most tutorials use. `npm install better-sqlite3` failed on my machine because it's a native module — it compiles C++ code during install via `node-gyp`, and that needs Visual Studio's C++ build tools installed, which I didn't have (and didn't want to install a multi-GB toolchain just to get a database working).
+I originally tried the `better-sqlite3` npm package, which is what most tutorials use. `npm install better-sqlite3` failed on my machine because it's a native module — it compiles C++ code during install via `node-gyp`, and that needs Visual Studio's C++ build tools installed, which I didn't have.
 
-The fix was switching to `node:sqlite`, which is a SQLite module built directly into Node.js itself. Since I'm running Node 24, it's available with no install step at all — no npm package, no compiler, nothing. The tradeoff is it's still officially labeled "experimental" in Node's docs (though it no longer needs the `--experimental-sqlite` flag as of Node 22.13/23.4+), and you'll see a one-time warning printed on startup that's safe to ignore. For a project this size, built-in and zero-install won out over using the more "standard" third-party package.
+The fix was switching to `node:sqlite`, a SQLite module built directly into Node.js itself. Since I'm running Node 24, it's available with no install step at all — no npm package, no compiler. It's still labeled "experimental" in Node's docs (though it no longer needs the `--experimental-sqlite` flag as of Node 22.13/23.4+), and prints a one-time harmless warning on startup.
 
-If this ever needed to handle multiple servers writing at once, I'd swap to Postgres — SQLite's one-file model isn't built for that kind of concurrency. Not a concern here.
+## How to run it (SQLite mode)
 
-## How to run it
-
-You need **Node.js 22.13+ or 23.4+** for `node:sqlite` to work without extra flags. Check with:
+You need **Node.js 22.13+ or 23.4+**. Check with:
 ```powershell
 node --version
 ```
@@ -46,16 +46,17 @@ cd ToDo-API
 ```powershell
 npm install
 ```
-This only installs Express and Swagger UI — there's nothing to install for the database, since `node:sqlite` ships with Node.
 
-3. Start the server:
+3. Set `DB_DRIVER=sqlite` in `.env` (or leave `.env` unset — SQLite is the default), then start the server:
 ```powershell
 node server.js
 ```
 
 4. API's running at `http://localhost:3000`. Docs at `http://localhost:3000/docs`.
 
-`tasks.db` gets created automatically the first time you run this, with the table and three example tasks already seeded. It's in `.gitignore`, so it never gets committed — every fresh clone starts from the same clean state instead of inheriting whatever was in my local file.
+`tasks.db` gets created automatically the first time you run this, with the table and three example tasks already seeded. It's in `.gitignore`, so it never gets committed.
+
+**For running against Postgres in Docker instead, see the BE-04 section near the bottom of this README.**
 
 ## Endpoints
 
@@ -71,15 +72,13 @@ node server.js
 
 ## How the code is organized
 
-Still all in `server.js`, same as A1:
+- `server.js` — Express app and routes. Talks only to `lib/repository.js`, never to a database directly (see BE-04 section for why).
+- `lib/repository.js` — picks which database implementation to load, based on the `DB_DRIVER` environment variable.
+- `lib/sqliteTaskRepository.js` — SQLite implementation (A2).
+- `lib/postgresTaskRepository.js` — Postgres implementation (BE-04).
+- `openapi.json` — Swagger spec served at `/docs`.
 
-1. **Setup** — Express, Swagger UI, and now `node:sqlite`.
-2. **Database bootstrap** — opens `tasks.db`, creates the `tasks` table if it's missing, seeds 3 example rows but only if the table's empty.
-3. **Routes** — same lookup → validate → act → respond pattern as A1. The "act" part now runs SQL against `tasks.db` instead of touching an array.
-4. **Swagger UI** — unchanged.
-5. **Server start** — unchanged.
-
-## Full code walkthrough
+## Full code walkthrough (SQLite repository)
 
 ### 1. Opening the database and creating the table
 
@@ -96,13 +95,15 @@ db.exec(`
 `);
 ```
 
-`new DatabaseSync("tasks.db")` opens the file, creating it if it's not there yet — this is the entire "create your database" step from Stage 0, one line.
+`node:sqlite` is built into Node itself — `require("node:sqlite")` needs no npm install and no native compilation.
 
-`CREATE TABLE IF NOT EXISTS` means this line is safe to run every single time the app starts. First run it actually builds the table. Every run after, it's a no-op because the table already exists — without `IF NOT EXISTS` the server would crash on every restart after the first.
+`new DatabaseSync("tasks.db")` opens the file, creating it if it's not there yet.
 
-`id INTEGER PRIMARY KEY AUTOINCREMENT` is the biggest change from A1. In A1 I calculated the next id myself with `Math.max(...tasks.map(t => t.id)) + 1`. Now SQLite does that — every insert gets a new, unique, ever-increasing id automatically. I don't touch id logic anywhere in this file anymore.
+`CREATE TABLE IF NOT EXISTS` is safe to run every startup: builds the table the first time, harmless no-op every time after.
 
-`done` is `INTEGER` not `BOOLEAN` because SQLite doesn't have a real boolean column type — it's a long-standing SQLite quirk. So `done` lives as `0`/`1` in the actual table, and I convert it to a real JS `true`/`false` right before sending anything back to the client (see the `toApiTask` helper below). I thought about converting it in every route individually but decided one helper function was less error-prone than repeating that logic five times.
+`id INTEGER PRIMARY KEY AUTOINCREMENT` means SQLite assigns ids itself — no more manual `Math.max(...) + 1` id bookkeeping like the original A1 in-memory version needed.
+
+`done` is `INTEGER` not `BOOLEAN` because SQLite has no native boolean column type — it's stored as `0`/`1` and converted to real JS `true`/`false` on the way out (see `toApiTask` below).
 
 ### 2. Seeding, but only once
 
@@ -131,131 +132,32 @@ if (row.count === 0) {
 }
 ```
 
-This is the part I got wrong on my first attempt, actually — I initially just inserted the 3 tasks with no check, and restarting the server kept adding 3 more every time (3, then 6, then 9). The count check fixes that: only seed if the table has 0 rows, meaning this only ever fires successfully once, on the very first run.
+The row count is checked *before* inserting anything — without this, every restart would add 3 more tasks (3, then 6, then 9). The `BEGIN`/`COMMIT`/`ROLLBACK` wrapping makes the three inserts all-or-nothing: if something failed partway through, the `catch` rolls back rather than leaving a partially-seeded table.
 
-The `BEGIN`/`COMMIT`/`ROLLBACK` wrapping is a transaction. If something failed halfway through inserting the 3 rows (crash, whatever), the `catch` rolls it back completely rather than leaving 1 or 2 rows sitting there — which would be worse than either 0 or 3, because then the `count === 0` check would never be true again and I'd be stuck with a permanently incomplete seed. I'd have used `better-sqlite3`'s `db.transaction(fn)` helper if I'd stuck with that package, but `node:sqlite` doesn't have that convenience method yet, so I wrote the transaction by hand instead. Same protection either way.
+### 3. Reading, creating, updating, deleting
 
-### 3. Reading tasks
+Every query uses a `?` parameterized placeholder, with the actual value passed separately (e.g. `.get(id)`), never glued into the SQL string. Pasting a value directly into SQL text (e.g. `` `WHERE id = ${id}` ``) risks SQL injection if that value ever contains something unexpected; binding it as a parameter means the database always treats it as a plain value, never as SQL syntax.
 
-```javascript
-app.get("/tasks", (req, res) => {
-    const rows = db.prepare("SELECT * FROM tasks").all();
-    res.json(rows.map(toApiTask));
-});
-
-app.get("/tasks/:id", (req, res) => {
-    const id = Number(req.params.id);
-    const task = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id);
-
-    if (!task) {
-        return res.status(404).json({ error: `Task ${id} not found` });
-    }
-
-    res.json(toApiTask(task));
-});
-```
-
-`.all()` gets every row back as an array. `.get()` gets one row, or `undefined` if nothing matched — which is why `if (!task)` still works exactly like A1's `.find()` returning `undefined`.
-
-The `?` in `WHERE id = ?` is the one thing I made sure to get right everywhere in this file: it's a parameterized placeholder. `id` gets passed in separately through `.get(id)`, never pasted directly into the SQL string. If I'd written `` `WHERE id = ${id}` `` instead, and `id` ever contained something unexpected, it could change what the query actually does — that's SQL injection. Binding it as a parameter means the database always treats it as a plain value, full stop, no matter what's in it.
-
-### 4. Creating a task
-
-```javascript
-app.post("/tasks", (req, res) => {
-    const title = req.body.title;
-
-    if (!title || title.trim() === "") {
-        return res.status(400).json({ error: "title is required" });
-    }
-
-    const result = db
-        .prepare("INSERT INTO tasks (title, done) VALUES (?, ?)")
-        .run(title, 0);
-
-    const newTask = db
-        .prepare("SELECT * FROM tasks WHERE id = ?")
-        .get(result.lastInsertRowid);
-
-    res.status(201).json(toApiTask(newTask));
-});
-```
-
-Validation is identical to A1. The new part is `result.lastInsertRowid` — after `.run()` executes the insert, it tells me the id SQLite just assigned. I use that to immediately re-select the row and send back exactly what got stored, id included, same guarantee A1 gave.
-
-### 5. Updating a task
-
-```javascript
-app.put("/tasks/:id", (req, res) => {
-    const id = Number(req.params.id);
-    const existing = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id);
-
-    if (!existing) {
-        return res.status(404).json({ error: `Task ${id} not found` });
-    }
-
-    const { title, done } = req.body;
-
-    if (title !== undefined && title.trim() === "") {
-        return res.status(400).json({ error: "title cannot be empty" });
-    }
-
-    const newTitle = title !== undefined ? title : existing.title;
-    const newDone = done !== undefined ? (done ? 1 : 0) : existing.done;
-
-    db.prepare("UPDATE tasks SET title = ?, done = ? WHERE id = ?").run(
-        newTitle,
-        newDone,
-        id
-    );
-
-    const updated = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id);
-    res.json(toApiTask(updated));
-});
-```
-
-This one took a bit of thinking to get right. A1's partial update just skipped assigning a property if the client didn't send it (`if (title !== undefined) task.title = title;`). But SQL's `UPDATE ... SET title = ?, done = ?` always needs a value for both columns — you can't leave one out mid-statement the way you can skip a JS assignment. So instead I figure out what each column's value *should be* first: the client's value if they sent one, otherwise whatever the row already had (`existing.title` / `existing.done`). The `UPDATE` always writes both columns, but sometimes it's just writing back the same value — which behaves identically to not touching it.
-
-### 6. Deleting a task
-
-```javascript
-app.delete("/tasks/:id", (req, res) => {
-    const id = Number(req.params.id);
-    const existing = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id);
-
-    if (!existing) {
-        return res.status(404).json({ error: `Task ${id} not found` });
-    }
-
-    db.prepare("DELETE FROM tasks WHERE id = ?").run(id);
-    res.status(204).send();
-});
-```
-
-Same lookup-then-404 pattern one more time. No more `tasks.filter(...)` reassignment trick from A1 — that was only needed because I was manipulating a JS array. The database just deletes the matching row directly.
+`PUT` does a partial update: since SQL's `UPDATE ... SET title = ?, done = ?` always needs a value for both columns (unlike JS, where you can just skip a property assignment), the code computes each column's new value first — the client's value if they sent one, otherwise the row's existing value — so unsent fields are effectively left untouched.
 
 ## Stage 4 — SQL by hand
 
-Opened `tasks.db` in DB Browser for SQLite and ran a few queries directly against it while the server was still running, to see if the API and DB Browser were really reading the same file live.
+Opened `tasks.db` in DB Browser for SQLite and ran queries directly against it while the server was running, to confirm the API and DB Browser read the exact same file live, with no restart needed.
 
 ```sql
 UPDATE tasks SET done = 1;
 ```
-Marked all 3 tasks as done. After clicking **Write Changes** in DB Browser, I hit `GET /tasks` from a separate terminal with no server restart, and all 3 tasks showed `"done": true` immediately.
+Marked all 3 tasks as done. After clicking **Write Changes** in DB Browser, `GET /tasks` immediately showed `"done": true` on all three, with no server restart.
 
-Also ran:
-```sql
-DELETE FROM tasks WHERE done = 1;
-```
-which wiped the table, confirmed via an empty `GET /tasks` response — then manually re-inserted the 3 seed rows through DB Browser to get back to a normal starting state. Worth noting: the re-inserted rows came back with ids `5, 6, 7`, not `1, 2, 3` — `AUTOINCREMENT` remembers the highest id it's ever handed out and never reuses one, even across a full delete.
+Also ran `DELETE FROM tasks WHERE done = 1;`, confirmed via an empty `GET /tasks`, then manually re-inserted the 3 seed rows through DB Browser. Worth noting: the re-inserted rows came back with new, higher ids — `AUTOINCREMENT` never reuses an id, even after a full delete.
 
 ![tasks.db in DB Browser](db-browser-screenshot.png)
 
-## A note on persistence
+## A note on persistence (SQLite)
 
-This is the actual point of the assignment: restarting the server no longer wipes the task list. `tasks.db` is a real file, so anything created, updated, or deleted through the API sticks around. The 3 example tasks only ever get inserted once — the very first time the app runs against an empty table.
+Restarting the server no longer wipes the task list — `tasks.db` is a real file, so anything created, updated, or deleted through the API sticks around. The 3 example tasks only ever get inserted once, the very first time the app runs against an empty table.
 
-## AI vs me
+## AI vs me (Assignment 1)
 
 ### My prompt
 
@@ -283,36 +185,104 @@ Got all five CRUD endpoints right, matching status codes (200, 201, 400, 404), m
 Tested all five endpoints against the AI's version and it matched my behavior every time — right status codes (200, 201, 400, 204), right JSON bodies.
 
 - **No `GET /` or `GET /health`.** `curl -i http://localhost:3000/` gave Express's default `404 Cannot GET /` instead of a JSON description. Not the AI's fault — I never mentioned these routes in the prompt.
-- **Id generation differs.** I said "generates the next free ID" without saying how. It used a separate counter (`let nextId = 4`); I derive mine from the array (`Math.max(...tasks.map(t => t.id)) + 1`). Both worked in my tests, but a counter can drift out of sync with the real data over time — deriving from the data can't.
-- **Delete implementation differs.** It used `tasks.splice(index, 1)`, I used `tasks.filter(t => t.id !== id)` — different technique, same result, confirmed both return 204 with an empty body.
+- **Id generation differs.** I said "generates the next free ID" without saying how. It used a separate counter (`let nextId = 4`); I derive mine from the array (`Math.max(...tasks.map(t => t.id)) + 1`). Both worked in my tests, but a counter can drift out of sync with the real data over time.
+- **Delete implementation differs.** It used `tasks.splice(index, 1)`, I used `tasks.filter(t => t.id !== id)` — different technique, same result.
 
 ### What my prompt forgot to specify
 
-- `GET /` and `/health` entirely — a real gap in my spec, not a stylistic choice.
-- Exactly how "next free ID" should work — the AI made its own reasonable call.
-- Whether the Swagger spec should be a separate file or inline — it inlined it, I kept mine separate.
-- Exact error message wording — mine says `"title is required"`, its says `"Title is required and cannot be empty"`. Same meaning, different text; I'd have needed to specify exact wording if that mattered to me.
+- `GET /` and `/health` entirely — a real gap in my spec.
+- Exactly how "next free ID" should work.
+- Whether the Swagger spec should be a separate file or inline.
+- Exact error message wording.
 
 ### One rematch
 
 Rewrote the prompt to explicitly call out `GET /` and `GET /health` with exact response bodies, and to require deriving the id from the array instead of using a counter. Both original gaps were my prompt's fault, not the AI's — confirms the whole point of this exercise: an AI's output is only as good as what you actually tell it.
-
-### Stage 6 — SQLite migration rematch (A2)
-
-_(To be added once I run Stage 6: writing my own migration prompt from memory, generating it into an `ai-version/` folder, and diffing it against this hand-built version.)_
 
 ## Example request
 
 ```powershell
 curl.exe -i http://localhost:3000/tasks/1
 ```
+
 ```
 HTTP/1.1 200 OK
 Content-Type: application/json; charset=utf-8
 {"id":1,"title":"Buy milk","done":false}
+
 ```
 ## Swagger UI
 
 All endpoints, viewable and testable at `http://localhost:3000/docs`:
 
 ![Swagger UI screenshot](swagger-screenshot.png)
+
+---
+
+# Assignment 3 (BE-04) — Postgres in Docker
+
+This update moves storage again — from SQLite (A2) to **Postgres running in Docker** — while proving the same architectural point A2 already set up: swapping the database is a config change, not a code change.
+
+## What changed
+
+- **A repository layer was introduced.** Before this, `server.js` talked to SQLite directly. Now all database logic lives behind a small interface — `getAll()`, `getById(id)`, `create(title)`, `update(id, fields)`, `remove(id)` — implemented twice: once for SQLite (`lib/sqliteTaskRepository.js`, unchanged from A2 except a rename), once for Postgres (`lib/postgresTaskRepository.js`, new). `lib/repository.js` picks which one to load based on the `DB_DRIVER` environment variable. `server.js` only ever calls `taskRepository.something()` — it has no idea which database is actually behind it.
+- **Postgres runs in Docker**, not installed locally. `docker-compose.yml` defines a `db` service using the official `postgres:16` image, with a named volume (`pgdata`) so data survives the container being destroyed and recreated.
+- **The app itself is also containerized.** A `Dockerfile` builds the Node app into an image; `docker-compose.yml`'s `app` service runs it alongside `db`. `docker compose up` starts both together with one command.
+- **Config moved to `.env`.** `DATABASE_URL` and `DB_DRIVER` are read from environment variables via the `dotenv` package, never hardcoded. `.env` holds the real values and is gitignored; `.env.example` is committed and documents the shape without any real secrets in it.
+
+## Why Postgres + Docker (vs. sticking with SQLite)
+
+SQLite was fine for A2 — single file, zero setup, genuinely good for a small local project. Postgres is the next step up: a real client-server database that supports concurrent connections properly, which matters once more than one thing might be reading/writing at once. Running it in Docker instead of installing Postgres directly on Windows means the exact same environment works on any machine — no "works on my machine" version mismatches, and no manual Postgres install/uninstall to manage.
+
+## Why a repository layer
+
+A2 already achieved "swap SQLite for Postgres without touching routes" in principle, but the SQL was still written directly inside `server.js`. Pulling it out into `lib/sqliteTaskRepository.js` and `lib/postgresTaskRepository.js` — both exporting the identical five function names — makes the swap literal: `lib/repository.js` is the *only* file that decides which implementation loads, based on one environment variable (`DB_DRIVER`). `server.js` was already correct before this change and needed zero edits to its route logic to support Postgres — only `await` was added in front of repository calls, since Postgres queries are asynchronous (real network calls) where SQLite's were synchronous (local file reads).
+
+## `.env` setup
+
+Copy the example file and it works as-is against the Docker Postgres setup below:
+```powershell
+copy .env.example .env
+```
+
+Contents of `.env.example` (safe to view — no real secrets, just documents what's needed):
+
+```
+DATABASE_URL=postgresql://taskapi:taskapi_dev_password@localhost:5432/tasks
+DB_DRIVER=postgres
+```
+- `DATABASE_URL` — the Postgres connection string: `postgresql://user:password@host:port/database`. When running the app directly on your machine against the Dockerized database, `host` is `localhost` because Docker publishes Postgres's port out to the host machine. Inside `docker-compose.yml`, the `app` service overrides this to `db:5432` instead — `db` is the *service name* Docker Compose gives that container on its internal network, and `localhost` from inside a container means "inside that container," not the host machine or the other container. That's the one genuinely non-obvious Docker networking detail in this whole setup.
+- `DB_DRIVER` — `postgres` or `sqlite` (or unset, which defaults to `sqlite`). This is the single switch `lib/repository.js` reads to decide which repository implementation to load.
+
+## How to run it
+
+```powershell
+docker compose up -d
+```
+
+This builds the app image, starts Postgres, waits for Postgres to report healthy (via a `pg_isready` healthcheck) before starting the app, and creates the `tasks` table + seeds 3 example tasks on first run. API available at `http://localhost:3000`, docs at `http://localhost:3000/docs`.
+
+To stop everything:
+```powershell
+docker compose down
+```
+This removes the containers but **not** the volume — `pgdata` and everything in it survives. To wipe the database completely (rare, intentional-only): `docker compose down -v`.
+
+## How persistence was proven
+
+Created a task through the running API, then tore down the *entire* stack — not paused, fully removed:
+```powershell
+docker compose down
+docker compose ps   # confirmed empty — both containers genuinely gone
+docker compose up -d
+```
+After the stack came back up (brand new containers, confirmed via fresh "Created" timestamps in `docker compose ps`), `GET /tasks` still showed the task created before the teardown. Since the containers were verifiably destroyed and recreated, the only thing that could have carried the data across is the named volume (`pgdata`) — proving the volume, not the container, is what actually persists the data. Ran this same before/after check against `psql` directly (`docker compose exec db psql -U taskapi -d tasks -c "SELECT * FROM tasks;"`) as a second, independent confirmation that the API wasn't just returning cached data.
+
+## Architecture
+
+Client
+→ API (Express, server.js)
+→ taskRepository (lib/repository.js — picks implementation via DB_DRIVER)
+→ sqliteTaskRepository → tasks.db
+→ postgresTaskRepository → Postgres (Docker container, pgdata volume)
+Routes and validation logic in `server.js` are byte-for-byte the same regardless of which branch of that diagram is active — the only thing that changes between SQLite and Postgres mode is one environment variable.
