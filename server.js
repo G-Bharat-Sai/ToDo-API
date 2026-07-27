@@ -2,6 +2,8 @@ const express = require("express");
 const swaggerUi = require("swagger-ui-express");
 const openapiSpec = require("./openapi.json");
 const taskRepository = require("./lib/repository");
+require("dotenv").config();
+const supabase = require("./lib/supabaseClient");
 
 const app = express();
 const PORT = 3000;
@@ -80,9 +82,15 @@ async function start() {
     if (typeof taskRepository.init === "function") {
         await taskRepository.init();
     }
+    const { error } = await supabase.auth.getSession();
+    if (error) {
+        console.error("Failed to connect to Supabase:", error.message);
+        process.exit(1);
+    }
 
     app.listen(PORT, () => {
         console.log(`Server running on http://localhost:${PORT}`);
+        console.log(`Connected to Supabase`);
         console.log(`Docs available at http://localhost:${PORT}/docs`);
     });
 }
