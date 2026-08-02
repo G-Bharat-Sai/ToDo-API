@@ -4,6 +4,7 @@ const openapiSpec = require("./openapi.json");
 const taskRepository = require("./lib/repository");
 require("dotenv").config();
 const supabase = require("./lib/supabaseClient");
+const requireAuth = require("./lib/requireAuth");
 
 const app = express();
 const PORT = 3000;
@@ -23,17 +24,9 @@ app.get("/health", (req, res) => {
     res.json({ status: "ok" });
 });
 
-// ----------------------------------------------------------------------
-// Stage 2 — public gate
-// ----------------------------------------------------------------------
-
 app.get("/public/info", (req, res) => {
     res.json({ message: "Welcome stranger! This info is public." });
 });
-
-// ----------------------------------------------------------------------
-// Stage 1 — Sign Up & Log In
-// ----------------------------------------------------------------------
 
 app.post("/auth/signup", async (req, res) => {
     const { email, password } = req.body;
@@ -70,42 +63,29 @@ app.post("/auth/login", async (req, res) => {
     });
 });
 
-// ----------------------------------------------------------------------
-// Stage 3 — protected gate with real token verification
-// ----------------------------------------------------------------------
+app.post("/auth/logout", requireAuth, async (req, res) => {
+    const { error } = await supabase.auth.signOut();
 
-app.get("/protected/profile", async (req, res) => {
-    const authHeader = req.headers.authorization;
-
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-        return res.status(401).json({ error: "Access token required" });
+    if (error) {
+        return res.status(400).json({ error: error.message });
     }
 
-    const token = authHeader.split(" ")[1];
+    res.status(204).send();
+});
 
-    if (!token) {
-        return res.status(401).json({ error: "Access token required" });
-    }
-
-    // Makes a real network call to Supabase to confirm the token is
-    // genuinely valid (correctly signed, not expired, user still
-    // exists) — not just a local signature check.
-    const { data, error } = await supabase.auth.getUser(token);
-
-    if (error || !data.user) {
-        return res.status(401).json({ error: "Invalid or expired token" });
-    }
-
+app.get("/protected/profile", requireAuth, (req, res) => {
     res.json({
-        id: data.user.id,
-        email: data.user.email,
-        created_at: data.user.created_at
+        id: req.user.id,
+        email: req.user.email,
+        created_at: req.user.created_at
     });
 });
 
-// ----------------------------------------------------------------------
-// Task routes (unchanged from BE-04)
-// ----------------------------------------------------------------------
+// Stage 4 checkpoint: a second protected route reusing the exact same
+// requireAuth middleware — zero new auth logic written for this route.
+app.get("/protected/dashboard", requireAuth, (req, res) => {
+    res.json({ message: `Welcome to your dashboard, ${req.user.email}` });
+});
 
 app.get("/tasks", async (req, res) => {
     const tasks = await taskRepository.getAll();
