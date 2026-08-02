@@ -23,6 +23,17 @@ app.get("/health", (req, res) => {
     res.json({ status: "ok" });
 });
 
+// ----------------------------------------------------------------------
+// Stage 2 — public gate
+// ----------------------------------------------------------------------
+
+app.get("/public/info", (req, res) => {
+    res.json({ message: "Welcome stranger! This info is public." });
+});
+
+// ----------------------------------------------------------------------
+// Stage 1 — Sign Up & Log In
+// ----------------------------------------------------------------------
 
 app.post("/auth/signup", async (req, res) => {
     const { email, password } = req.body;
@@ -58,6 +69,26 @@ app.post("/auth/login", async (req, res) => {
         refresh_token: data.session.refresh_token
     });
 });
+
+
+app.get("/protected/profile", (req, res) => {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        return res.status(401).json({ error: "Access token required" });
+    }
+
+    const token = authHeader.split(" ")[1];
+
+    if (!token) {
+        return res.status(401).json({ error: "Access token required" });
+    }
+
+   
+    res.json({ message: "Token present (not yet verified)" });
+});
+
+
 
 app.get("/tasks", async (req, res) => {
     const tasks = await taskRepository.getAll();
