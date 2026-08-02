@@ -286,3 +286,110 @@ Client
 → sqliteTaskRepository → tasks.db
 → postgresTaskRepository → Postgres (Docker container, pgdata volume)
 Routes and validation logic in `server.js` are byte-for-byte the same regardless of which branch of that diagram is active — the only thing that changes between SQLite and Postgres mode is one environment variable.
+
+---
+
+# Assignment 4 — Auth: Login & Protect
+
+This update adds user authentication on top of everything already built — Supabase Auth handles account creation, password hashing, and token signing; this API's job is only to receive tokens, verify them, and open (or refuse) protected routes.
+
+## What changed
+
+- **Supabase Auth as Identity Provider.** No passwords are ever stored or hashed by this app — `supabase.auth.signUp()` and `signInWithPassword()` do that entirely on Supabase's side. This app only forwards credentials and translates Supabase's response into the right HTTP status code.
+- **Five new routes:** `POST /auth/signup`, `POST /auth/login`, `POST /auth/logout`, `GET /protected/profile`, `GET /public/info`.
+- **A reusable auth middleware** (`lib/requireAuth.js`) verifies the bearer token against Supabase and attaches the verified user to `req.user`. It's applied to `/auth/logout`, `/protected/profile`, and `/protected/dashboard` — adding it to a new route took one line, no new auth logic.
+- **Swagger UI now shows an Authorize padlock** on every protected route, via a `bearerAuth` security scheme in `openapi.json`.
+
+## Endpoint reference
+
+| Method | Path | Auth required | Description | Success | Errors |
+|---|---|---|---|---|---|
+| POST | `/auth/signup` | none | Create a new user account | 201 | 400 missing input |
+| POST | `/auth/login` | none | Authenticate, returns access + refresh token | 200 | 400 missing input, 401 invalid credentials |
+| POST | `/auth/logout` | Bearer token | End the current session | 204 | 401 missing/invalid token |
+| GET | `/protected/profile` | Bearer token | Return the logged-in user's id, email, created_at | 200 | 401 missing/invalid token |
+| GET | `/protected/dashboard` | Bearer token | Personalized welcome message | 200 | 401 missing/invalid token |
+| GET | `/public/info` | none | Open, no-auth welcome message | 200 | — |
+
+(Task CRUD endpoints from A1–BE-04 are unchanged and unaffected by this update — see the earlier sections of this README.)
+
+## `.env` setup
+
+Add these to your `.env` (alongside the existing `DATABASE_URL`/`DB_DRIVER` variables from BE-04):
+
+SUPABASE_URL=your_project_url
+SUPABASE_KEY=your_anon_key
+PORT=3000
+
+Both values come from your Supabase project's **Settings → API** page. **Never use the `service_role` key here** — only the `anon`/`public` key, which is safe to use client-side. `.env.example` documents this shape without real values; `.env` itself is gitignored and has never been committed (verified via `git log --all --full-history -- .env`, which returns nothing).
+
+One Supabase dashboard setting matters for local testing: **Authentication → Sign In / Providers → Email → "Confirm email"** should be turned **off**, so a freshly signed-up user can log in immediately without clicking an email confirmation link. (In production you'd leave this on.)
+
+## How to run it
+
+Same as BE-04 — the auth setup layers on top, no new run command:
+```powershell
+docker compose up -d
+```
+or, running the app locally against Dockerized Postgres:
+```powershell
+docker compose up -d db
+node server.js
+```
+On startup, the server confirms it can reach both Postgres and Supabase before it starts listening — if either connection fails, it logs an error and exits rather than silently serving broken requests.
+
+## The guard: how token verification works
+
+```javascript
+async function requireAuth(req, res, next) {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        return res.status(401).json({ error: "Access token required" });
+    }
+
+    const token = authHeader.split(" ")[1];
+    if (!token) {
+        return res.status(401).json({ error: "Access token required" });
+    }
+
+    const { data, error } = await supabase.auth.getUser(token);
+    if (error || !data.user) {
+        return res.status(401).json({ error: "Invalid or expired token" });
+    }
+
+    req.user = data.user;
+    next();
+}
+```
+
+- `supabase.auth.getUser(token)` makes a real network call to Supabase — not just a local signature check — confirming the token is genuinely valid and the user still exists.
+- Checking both `error` and `!data.user` (not just `error` alone) is deliberate: trusting a truthy `data.user` without also checking for an explicit error is exactly the kind of shortcut that can silently accept a bad token.
+- Verified once, in one file. Applying it to a new route is one line (`app.get("/new-route", requireAuth, handler)`) — no copy-pasted token logic to keep in sync across routes.
+
+Verified with a real forged token: took a valid access token, corrupted its last 5 characters, and confirmed the guard correctly returned `401 Invalid or expired token` — proving the signature check genuinely rejects tampering, not just missing headers.
+
+## Swagger UI with bearer auth
+
+`openapi.json` now includes:
+```json
+"components": {
+  "securitySchemes": {
+    "bearerAuth": {
+      "type": "http",
+      "scheme": "bearer",
+      "bearerFormat": "JWT"
+    }
+  }
+}
+```
+with `"security": [{ "bearerAuth": [] }]` added to each protected route's definition. This makes Swagger UI render an **Authorize** button — paste a token in once, and every subsequent "Try it out" call on a protected route automatically includes it as an `Authorization: Bearer <token>` header, no manual header entry needed per-request.
+
+![Swagger authorized request to /protected/profile](swagger-auth-screenshot.png)
+
+## Security notes
+
+- Login always returns a generic `"Invalid login credentials"` error regardless of whether the email doesn't exist or the password is wrong — revealing which is which would let an attacker enumerate valid emails against this system.
+- The `service_role` Supabase key (which bypasses all security) is never used anywhere in this codebase — only the `anon` key, which is safe to expose.
+- `.env` has never been committed; confirmed via full git history search.
+
