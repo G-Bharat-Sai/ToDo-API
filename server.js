@@ -6,7 +6,7 @@ require("dotenv").config();
 const supabase = require("./lib/supabaseClient");
 const requireAuth = require("./lib/requireAuth");
 const { NormalizeInputSchema } = require("./src/llm/schema");
-const { stubNormalize, callModel } = require("./src/llm/normalize");
+const { stubNormalize, normalize } = require("./src/llm/normalize");
 
 const app = express();
 const PORT = 3000;
@@ -90,8 +90,8 @@ app.get("/protected/dashboard", requireAuth, (req, res) => {
 });
 
 // ----------------------------------------------------------------------
-// A17 Stage 2 — /normalize: real model call wired in (raw output for
-// now; Stage 3 adds parsing, schema validation, and repair on top)
+// A17 Stage 3 — /normalize: parse, validate, repair once, quarantine
+// on final failure. Never returns raw model text to the caller.
 // ----------------------------------------------------------------------
 app.post("/normalize", async (req, res) => {
     const parsed = NormalizeInputSchema.safeParse(req.body);
@@ -110,8 +110,15 @@ app.post("/normalize", async (req, res) => {
         return res.json(result);
     }
 
-    const rawOutput = await callModel(text);
-    return res.json({ raw_model_output: rawOutput });
+    try {
+        const result = await normalize(text);
+        return res.json(result);
+    } catch (err) {
+        if (err.isQuarantineFailure) {
+            return res.status(422).json({ error: "Could not produce a valid result for this input" });
+        }
+        throw err;
+    }
 });
 
 app.get("/tasks", async (req, res) => {
