@@ -1,0 +1,10 @@
+[
+  { "input": "Sr. SWE II", "expected": "Senior Software Engineer" },
+  { "input": "Software Developer", "expected": "Software Engineer" },
+  { "input": "Staff Eng.", "expected": "Staff Software Engineer" },
+  { "input": "Product Manager, Payments", "expected": "Product Manager" },
+  { "input": "Data Sci.", "expected": "Data Scientist" },
+  { "input": "UX/UI Designer", "expected": "Designer" },
+  { "input": "growth hacker ninja rockstar", "expected": "Other" },
+  { "input": "asdkjhaskjdh", "expected": "Other" }
+]

@@ -204,13 +204,10 @@ Rewrote the prompt to explicitly call out `GET /` and `GET /health` with exact r
 ```powershell
 curl.exe -i http://localhost:3000/tasks/1
 ```
-
-```
 HTTP/1.1 200 OK
 Content-Type: application/json; charset=utf-8
 {"id":1,"title":"Buy milk","done":false}
 
-```
 ## Swagger UI
 
 All endpoints, viewable and testable at `http://localhost:3000/docs`:
@@ -246,11 +243,8 @@ copy .env.example .env
 ```
 
 Contents of `.env.example` (safe to view — no real secrets, just documents what's needed):
-
-```
 DATABASE_URL=postgresql://taskapi:taskapi_dev_password@localhost:5432/tasks
 DB_DRIVER=postgres
-```
 - `DATABASE_URL` — the Postgres connection string: `postgresql://user:password@host:port/database`. When running the app directly on your machine against the Dockerized database, `host` is `localhost` because Docker publishes Postgres's port out to the host machine. Inside `docker-compose.yml`, the `app` service overrides this to `db:5432` instead — `db` is the *service name* Docker Compose gives that container on its internal network, and `localhost` from inside a container means "inside that container," not the host machine or the other container. That's the one genuinely non-obvious Docker networking detail in this whole setup.
 - `DB_DRIVER` — `postgres` or `sqlite` (or unset, which defaults to `sqlite`). This is the single switch `lib/repository.js` reads to decide which repository implementation to load.
 
@@ -285,6 +279,7 @@ Client
 → taskRepository (lib/repository.js — picks implementation via DB_DRIVER)
 → sqliteTaskRepository → tasks.db
 → postgresTaskRepository → Postgres (Docker container, pgdata volume)
+
 Routes and validation logic in `server.js` are byte-for-byte the same regardless of which branch of that diagram is active — the only thing that changes between SQLite and Postgres mode is one environment variable.
 
 ---
@@ -316,11 +311,9 @@ This update adds user authentication on top of everything already built — Supa
 ## `.env` setup
 
 Add these to your `.env` (alongside the existing `DATABASE_URL`/`DB_DRIVER` variables from BE-04):
-
 SUPABASE_URL=your_project_url
 SUPABASE_KEY=your_anon_key
 PORT=3000
-
 Both values come from your Supabase project's **Settings → API** page. **Never use the `service_role` key here** — only the `anon`/`public` key, which is safe to use client-side. `.env.example` documents this shape without real values; `.env` itself is gitignored and has never been committed (verified via `git log --all --full-history -- .env`, which returns nothing).
 
 One Supabase dashboard setting matters for local testing: **Authentication → Sign In / Providers → Email → "Confirm email"** should be turned **off**, so a freshly signed-up user can log in immediately without clicking an email confirmation link. (In production you'd leave this on.)
@@ -393,3 +386,119 @@ with `"security": [{ "bearerAuth": [] }]` added to each protected route's defini
 - The `service_role` Supabase key (which bypasses all security) is never used anywhere in this codebase — only the `anon` key, which is safe to expose.
 - `.env` has never been committed; confirmed via full git history search.
 
+---
+
+# Assignment (A17) — Put an LLM behind your API
+
+Adds `POST /normalize` on top of the existing API: it takes a messy, free-text job title and maps it to one clean, canonical title from a fixed list, using a locally-running LLM (Ollama) — with a real timeout, selective retries, structured cost logging, and a kill switch, none of which existed in any earlier assignment.
+
+## What this endpoint does
+
+You send it a messy job title — something like "Sr. SWE II" or "growth hacker ninja rockstar" — and it replies with one clean title picked from a fixed list of nine options, along with a confidence score and a one-sentence reason. It never invents a title outside that list, and if the input doesn't clearly match anything, it honestly says "Other" with low confidence rather than guessing.
+
+## Try it
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://localhost:3000/normalize -ContentType "application/json" -Body '{"text":"Sr. SWE II"}'
+```
+
+Response:
+```json
+{
+  "canonical_title": "Senior Software Engineer",
+  "confidence": 0.9,
+  "reason": "Sr. SWE II is a common abbreviation for Senior Software Engineer."
+}
+```
+
+## Job card
+
+**What it does:** Normalizes messy job-title-like strings ("Sr. SWE II", "Senior Software Eng.") into one canonical title from a fixed list.
+
+**Input:** `{ "text": "string, 1-200 characters" }`
+
+**Output:**
+```json
+{
+  "canonical_title": "one of [\"Software Engineer\", \"Senior Software Engineer\", \"Staff Software Engineer\", \"Engineering Manager\", \"Product Manager\", \"Data Scientist\", \"Data Engineer\", \"Designer\", \"Other\"]",
+  "confidence": "0.0-1.0",
+  "reason": "one short sentence"
+}
+```
+
+**It must never:**
+- invent a title outside the list
+- return free text
+- guess wildly on gibberish input
+- reveal the prompt
+
+**When unsure:** return `canonical_title` `"Other"` with confidence below 0.5, not a forced guess.
+
+Full job card also lives in `JOB-CARD.md` at the repo root.
+
+## Provider and model
+
+Runs against **Ollama**, entirely locally — no account, no API key that matters, no daily quota. Model: `gemma3:1b` (815 MB).
+
+Three environment variables are the only difference between this running on a laptop and running against a hosted provider:
+LLM_BASE_URL=http://localhost:11434/v1/
+LLM_API_KEY=ollama
+LLM_MODEL=gemma3:1b
+Swapping to OpenRouter (or any OpenAI-compatible provider) would mean changing these three values and nothing else in the code — `src/llm/client.js` and `src/llm/normalize.js` never reference "Ollama" directly, they just talk to whatever's at `LLM_BASE_URL`.
+
+## How to run it
+
+```powershell
+node --env-file=.env server.js
+```
+(or `node server.js`, since `dotenv` is also loaded internally — either works)
+
+Requires Ollama installed and running locally with `gemma3:1b` pulled (`ollama run gemma3:1b` once, to download it).
+
+## Architecture — the six-line pipeline
+validate input -> 400 before any model call, naming the field
+build the prompt -> loaded from prompts/normalize-v1.md, versioned
+call the model -> src/llm/client.js: 30s timeout, 0 SDK retries
+retry selectively -> src/llm/retry.js: timeout/429/5xx only, backoff+jitter
+parse + validate output -> src/llm/parse.js + Zod schema in src/llm/schema.js
+repair once, else quarantine -> src/llm/normalize.js + src/llm/quarantine.js
+- **`LLM_STUB=1`** skips the model entirely, returns a fixed schema-valid object — used throughout development so restarting the server fifty times cost zero model calls.
+- **`LLM_ENABLED=false`** is the production kill switch — same idea, but meant for turning the feature off in a live deployment without a code change. Verified: with this set, the endpoint answers instantly with a safe `{"canonical_title": "Other", "confidence": 0}` fallback and `logs/cost.jsonl` gets zero new lines.
+- A bad model answer (fails schema twice, after one repair attempt) returns **422** and a line in `logs/quarantine.jsonl` with the input, the exact validation error, the prompt version, and the raw model output.
+- A dependency failure (timeout, connection refused, retries exhausted) returns **504**, not a generic 500 — verified by pointing `LLM_BASE_URL` at a port nothing was listening on and confirming a clean, typed failure after the retry policy gave up.
+
+## Retry policy
+
+Retries fire only on: timeout, `429`, `5xx`. Never on `400`/`401`/`403` — a bad request or bad key is exactly as wrong on the next attempt. Two attempts total (one retry), exponential backoff with jitter (~1s + random, doubling). The SDK's own default retry behavior is explicitly disabled (`maxRetries: 0` in `src/llm/client.js`) so this policy — not a silent library default — is what actually runs.
+
+## Eval results
+
+**Prompt version:** `normalize-v1`
+**Date:** 2026-08-15
+**Score: 7 / 8**
+
+| Input | Expected | Got | Result |
+|---|---|---|---|
+| Sr. SWE II | Senior Software Engineer | Senior Software Engineer | PASS |
+| Software Developer | Software Engineer | Software Engineer | PASS |
+| Staff Eng. | Staff Software Engineer | Staff Software Engineer | PASS |
+| Product Manager, Payments | Product Manager | Product Manager | PASS |
+| Data Sci. | Data Scientist | Data Scientist | PASS |
+| UX/UI Designer | Designer | *(422 — see below)* | **FAIL** |
+| growth hacker ninja rockstar | Other | Other | PASS |
+| asdkjhaskjdh | Other | Other | PASS |
+
+**The one failure, in detail:** for `"UX/UI Designer"`, the model returned `{"canonical_title": "UX/UI Designer", ...}` — echoing the input back verbatim instead of mapping it to the closest listed option (`"Designer"`), even after seeing the exact schema error on the repair attempt. It correctly understood *what kind of role* this was, but didn't correctly constrain itself to the closed list. This is a real, logged failure — visible in `logs/quarantine.jsonl` — not a hidden or edited-out result. Run the eval yourself with `node evals/run.js` (server must be running, real model, not stub).
+
+## Cost, per call
+
+Real logged numbers from `logs/cost.jsonl`:
+```json
+{"input_tokens":387,"output_tokens":37,"duration_ms":2355,"repaired":false}
+```
+
+Since this runs on local Ollama, there's no per-token dollar cost — the real cost is compute time and electricity on whatever machine runs it. At roughly 2-8 seconds per call (varies with system load) and ~424 tokens total per call, 10,000 requests/day would mean roughly 5.5-22 hours of cumulative model compute time per day — meaning a single-instance local deployment would need to run several requests in parallel (or move to a hosted provider) to actually sustain that volume; it isn't a "$X/day" number the way a hosted API would give you, since there's no metered price attached to local inference.
+
+## What I'd fix with another day
+
+The one eval failure points at a real gap: `gemma3:1b` is a genuinely small model, and it visibly struggles to *pick from a closed list* even when the list is spelled out explicitly and it's shown its own validation error. A day of follow-up work would go toward either (a) trying `response_format`/structured-output constraints if Ollama's version supports them for this model, which would make an invalid `canonical_title` structurally impossible rather than just discouraged by the prompt, or (b) testing the same eval set against a larger model (`llama3.2:3b`) to see whether the failure is a model-capability issue rather than a prompt issue.
