@@ -90,8 +90,9 @@ app.get("/protected/dashboard", requireAuth, (req, res) => {
 });
 
 // ----------------------------------------------------------------------
-// A17 Stage 3 — /normalize: parse, validate, repair once, quarantine
-// on final failure. Never returns raw model text to the caller.
+// A17 Stage 4 — /normalize: real timeout + retry policy + cost logging
+// + kill switch (all in normalize.js). 422 for a bad model answer,
+// 504 for a dependency failure (timeout/connection/exhausted retries).
 // ----------------------------------------------------------------------
 app.post("/normalize", async (req, res) => {
     const parsed = NormalizeInputSchema.safeParse(req.body);
@@ -117,7 +118,10 @@ app.post("/normalize", async (req, res) => {
         if (err.isQuarantineFailure) {
             return res.status(422).json({ error: "Could not produce a valid result for this input" });
         }
-        throw err;
+        // Anything else (timeout, connection failure, 5xx from the
+        // provider after retries were exhausted) is a dependency
+        // failure, not a validation failure — 504, not a generic 500.
+        return res.status(504).json({ error: "The model did not respond in time. Please try again." });
     }
 });
 
