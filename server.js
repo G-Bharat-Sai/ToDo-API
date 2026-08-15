@@ -5,6 +5,8 @@ const taskRepository = require("./lib/repository");
 require("dotenv").config();
 const supabase = require("./lib/supabaseClient");
 const requireAuth = require("./lib/requireAuth");
+const { NormalizeInputSchema } = require("./src/llm/schema");
+const { stubNormalize } = require("./src/llm/normalize");
 
 const app = express();
 const PORT = 3000;
@@ -85,6 +87,30 @@ app.get("/protected/profile", requireAuth, (req, res) => {
 // requireAuth middleware — zero new auth logic written for this route.
 app.get("/protected/dashboard", requireAuth, (req, res) => {
     res.json({ message: `Welcome to your dashboard, ${req.user.email}` });
+});
+
+// ----------------------------------------------------------------------
+// A17 Stage 1 — /normalize: input validation + output schema + stub mode
+// ----------------------------------------------------------------------
+app.post("/normalize", async (req, res) => {
+    const parsed = NormalizeInputSchema.safeParse(req.body);
+
+    if (!parsed.success) {
+        const issue = parsed.error.issues[0];
+        return res.status(400).json({
+            error: `Invalid input: ${issue.path.join(".")} — ${issue.message}`
+        });
+    }
+
+    const { text } = parsed.data;
+
+    if (process.env.LLM_STUB === "1") {
+        const result = stubNormalize(text);
+        return res.json(result);
+    }
+
+    // Stage 2 will replace this with a real model call.
+    return res.status(501).json({ error: "Real model call not implemented yet (Stage 2)" });
 });
 
 app.get("/tasks", async (req, res) => {
