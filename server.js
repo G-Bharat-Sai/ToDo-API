@@ -6,7 +6,7 @@ require("dotenv").config();
 const supabase = require("./lib/supabaseClient");
 const requireAuth = require("./lib/requireAuth");
 const { NormalizeInputSchema } = require("./src/llm/schema");
-const { stubNormalize } = require("./src/llm/normalize");
+const { stubNormalize, callModel } = require("./src/llm/normalize");
 
 const app = express();
 const PORT = 3000;
@@ -90,7 +90,8 @@ app.get("/protected/dashboard", requireAuth, (req, res) => {
 });
 
 // ----------------------------------------------------------------------
-// A17 Stage 1 — /normalize: input validation + output schema + stub mode
+// A17 Stage 2 — /normalize: real model call wired in (raw output for
+// now; Stage 3 adds parsing, schema validation, and repair on top)
 // ----------------------------------------------------------------------
 app.post("/normalize", async (req, res) => {
     const parsed = NormalizeInputSchema.safeParse(req.body);
@@ -109,8 +110,8 @@ app.post("/normalize", async (req, res) => {
         return res.json(result);
     }
 
-    // Stage 2 will replace this with a real model call.
-    return res.status(501).json({ error: "Real model call not implemented yet (Stage 2)" });
+    const rawOutput = await callModel(text);
+    return res.json({ raw_model_output: rawOutput });
 });
 
 app.get("/tasks", async (req, res) => {
