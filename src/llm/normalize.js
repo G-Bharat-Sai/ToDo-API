@@ -1,6 +1,6 @@
 const fs = require("fs");
 const path = require("path");
-const client = require("./client");
+const { complete } = require("./providers");
 const { NormalizeOutputSchema } = require("./schema");
 const { extractJson } = require("./parse");
 const { logQuarantine } = require("./quarantine");
@@ -21,8 +21,6 @@ function stubNormalize(text) {
     return NormalizeOutputSchema.parse(stubResponse);
 }
 
-// Fallback returned by the kill switch (LLM_ENABLED=false) - safe,
-// deterministic, and instant. No model call, no cost, no risk.
 function fallbackNormalize(text) {
     return {
         canonical_title: "Other",
@@ -31,46 +29,33 @@ function fallbackNormalize(text) {
     };
 }
 
-// One retried, timed, logged call to the model. Retry policy (which
-// errors are worth retrying) lives in retry.js; this function is just
-// responsible for timing the call and logging what it cost.
-async function timedModelCall(messages) {
+// One retried, timed, logged call - now routed through the provider
+// interface (complete()) instead of talking to an OpenAI-shaped
+// client directly. normalize.js has no idea whether Ollama, the mock
+// provider, or anything else is actually answering.
+async function timedModelCall(userInput, priorMessages) {
     const start = Date.now();
 
-    const response = await withRetry(function () {
-        return client.chat.completions.create({
-            model: process.env.LLM_MODEL,
-            temperature: 0.2,
-            messages: messages
-        });
+    const result = await withRetry(function () {
+        return complete(SYSTEM_PROMPT, userInput, priorMessages);
     }, 2);
 
     const durationMs = Date.now() - start;
-    const usage = response.usage || {};
 
     return {
-        text: response.choices[0].message.content,
+        text: result.text,
         durationMs: durationMs,
-        inputTokens: usage.prompt_tokens,
-        outputTokens: usage.completion_tokens
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens
     };
 }
 
 async function normalize(text) {
-    // Kill switch: skip the model entirely, return a safe fallback,
-    // zero model calls, zero log lines. This is the thing someone who
-    // is not you needs to be able to flip without a deploy the day
-    // the provider has an outage or the bill spikes.
     if (process.env.LLM_ENABLED === "false") {
         return fallbackNormalize(text);
     }
 
-    const baseMessages = [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: text }
-    ];
-
-    const firstCall = await timedModelCall(baseMessages);
+    const firstCall = await timedModelCall(text, []);
     const firstParsed = extractJson(firstCall.text);
     const firstResult = firstParsed
         ? NormalizeOutputSchema.safeParse(firstParsed)
@@ -79,7 +64,7 @@ async function normalize(text) {
     if (firstResult.success) {
         logCost({
             promptVersion: PROMPT_VERSION,
-            model: process.env.LLM_MODEL,
+            model: process.env.LLM_PROVIDER === "mock" ? "mock" : process.env.LLM_MODEL,
             inputTokens: firstCall.inputTokens,
             outputTokens: firstCall.outputTokens,
             durationMs: firstCall.durationMs,
@@ -92,15 +77,15 @@ async function normalize(text) {
         ? firstResult.error.issues.map(function (i) { return i.path.join(".") + ": " + i.message; }).join("; ")
         : firstResult.error.message;
 
-    const repairMessages = baseMessages.concat([
+    const repairPriorMessages = [
         { role: "assistant", content: firstCall.text },
         {
             role: "user",
             content: "Your previous answer was rejected for this reason: " + errorMessage + ". Return only corrected JSON matching the schema."
         }
-    ]);
+    ];
 
-    const repairCall = await timedModelCall(repairMessages);
+    const repairCall = await timedModelCall(text, repairPriorMessages);
     const repairParsed = extractJson(repairCall.text);
     const repairResult = repairParsed
         ? NormalizeOutputSchema.safeParse(repairParsed)
@@ -113,7 +98,7 @@ async function normalize(text) {
     if (repairResult.success) {
         logCost({
             promptVersion: PROMPT_VERSION,
-            model: process.env.LLM_MODEL,
+            model: process.env.LLM_PROVIDER === "mock" ? "mock" : process.env.LLM_MODEL,
             inputTokens: totalInputTokens,
             outputTokens: totalOutputTokens,
             durationMs: totalDurationMs,
@@ -135,7 +120,7 @@ async function normalize(text) {
 
     logCost({
         promptVersion: PROMPT_VERSION,
-        model: process.env.LLM_MODEL,
+        model: process.env.LLM_PROVIDER === "mock" ? "mock" : process.env.LLM_MODEL,
         inputTokens: totalInputTokens,
         outputTokens: totalOutputTokens,
         durationMs: totalDurationMs,
