@@ -15,9 +15,6 @@ async function runOneCase(testCase) {
 
     const body = await response.json();
 
-    // Empty input is expected to be rejected by input validation
-    // before ever reaching the model - a 400 there is a PASS, not
-    // a missing canonical_title.
     if (testCase.input === "") {
         const isMatch = response.status === 400;
         return { isMatch: isMatch, actual: "(400 - " + (body.error || "no error message") + ")" };
@@ -25,32 +22,23 @@ async function runOneCase(testCase) {
 
     const actual = body.canonical_title;
     const isMatch = actual === testCase.expected;
-    return { isMatch: isMatch, actual: actual || ("(no canonical_title - status " + response.status + ")") };
+    return { isMatch: isMatch, actual: actual || ("(no canonical_title - status " + response.status + ")"), fullBody: body };
 }
 
 async function runEval() {
-    var totalPassed = 0;
-    var easyTotal = 0;
-    var easyPassed = 0;
-    var hardTotal = 0;
-    var hardPassed = 0;
+    var categories = {};
     var failures = [];
 
     for (var i = 0; i < cases.length; i++) {
         var testCase = cases[i];
         var result = await runOneCase(testCase);
+        var cat = testCase.difficulty;
 
-        if (testCase.difficulty === "easy") {
-            easyTotal++;
-            if (result.isMatch) easyPassed++;
-        } else {
-            hardTotal++;
-            if (result.isMatch) hardPassed++;
-        }
+        if (!categories[cat]) categories[cat] = { total: 0, passed: 0 };
+        categories[cat].total++;
+        if (result.isMatch) categories[cat].passed++;
 
-        if (result.isMatch) {
-            totalPassed++;
-        } else {
+        if (!result.isMatch) {
             failures.push({
                 input: testCase.input,
                 expected: testCase.expected,
@@ -60,11 +48,26 @@ async function runEval() {
         }
 
         console.log((result.isMatch ? "PASS" : "FAIL") + "  [" + testCase.difficulty + "]  \"" + testCase.input + "\" -> expected: " + testCase.expected + ", got: " + result.actual);
+
+        // For injection cases specifically, also print the full raw
+        // response - if an attack partially succeeded (e.g. a weird
+        // confidence value came through even though canonical_title
+        // matched), we want to actually see it, not just PASS/FAIL.
+        if (testCase.difficulty === "injection" && result.fullBody) {
+            console.log("        full response: " + JSON.stringify(result.fullBody));
+        }
     }
 
-    console.log("\nOverall: " + totalPassed + " / " + cases.length + " passed");
-    console.log("Easy:    " + easyPassed + " / " + easyTotal + " passed");
-    console.log("Hard:    " + hardPassed + " / " + hardTotal + " passed");
+    var totalPassed = 0;
+    var totalCount = 0;
+    console.log("\nBy category:");
+    for (var catName in categories) {
+        var c = categories[catName];
+        totalPassed += c.passed;
+        totalCount += c.total;
+        console.log("  " + catName + ": " + c.passed + " / " + c.total);
+    }
+    console.log("\nOverall: " + totalPassed + " / " + totalCount + " passed");
 
     if (failures.length > 0) {
         console.log("\nFailures:");
