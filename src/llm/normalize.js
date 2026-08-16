@@ -6,10 +6,17 @@ const { extractJson } = require("./parse");
 const { logQuarantine } = require("./quarantine");
 const { withRetry } = require("./retry");
 const { logCost } = require("./costLog");
+const { estimateTokens } = require("./tokenEstimate");
 
 const PROMPT_VERSION = "normalize-v1";
 const PROMPT_PATH = path.join(__dirname, "..", "..", "prompts", PROMPT_VERSION + ".md");
 const SYSTEM_PROMPT = fs.readFileSync(PROMPT_PATH, "utf-8");
+
+// A generous limit for this job - normal inputs are a few dozen
+// tokens including the system prompt. 2000 catches anything wildly
+// oversized (someone pasting a whole document instead of a job
+// title) before it ever reaches the model.
+const MAX_ESTIMATED_TOKENS = 2000;
 
 function stubNormalize(text) {
     const stubResponse = {
@@ -29,10 +36,13 @@ function fallbackNormalize(text) {
     };
 }
 
-// One retried, timed, logged call - now routed through the provider
-// interface (complete()) instead of talking to an OpenAI-shaped
-// client directly. normalize.js has no idea whether Ollama, the mock
-// provider, or anything else is actually answering.
+class TokenLimitError extends Error {
+    constructor(estimated, limit) {
+        super("Estimated " + estimated + " tokens, which exceeds the limit of " + limit);
+        this.isTokenLimitError = true;
+    }
+}
+
 async function timedModelCall(userInput, priorMessages) {
     const start = Date.now();
 
@@ -53,6 +63,14 @@ async function timedModelCall(userInput, priorMessages) {
 async function normalize(text) {
     if (process.env.LLM_ENABLED === "false") {
         return fallbackNormalize(text);
+    }
+
+    // Estimate before spending anything - reject an oversized request
+    // the same way a bad-shaped request gets rejected: before any
+    // model call, no cost incurred.
+    const estimated = estimateTokens(SYSTEM_PROMPT) + estimateTokens(text);
+    if (estimated > MAX_ESTIMATED_TOKENS) {
+        throw new TokenLimitError(estimated, MAX_ESTIMATED_TOKENS);
     }
 
     const firstCall = await timedModelCall(text, []);
@@ -132,4 +150,4 @@ async function normalize(text) {
     throw err;
 }
 
-module.exports = { stubNormalize: stubNormalize, normalize: normalize };
+module.exports = { stubNormalize: stubNormalize, normalize: normalize, TokenLimitError: TokenLimitError };

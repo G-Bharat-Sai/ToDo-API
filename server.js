@@ -90,9 +90,10 @@ app.get("/protected/dashboard", requireAuth, (req, res) => {
 });
 
 // ----------------------------------------------------------------------
-// A17 Stage 4 — /normalize: real timeout + retry policy + cost logging
-// + kill switch (all in normalize.js). 422 for a bad model answer,
-// 504 for a dependency failure (timeout/connection/exhausted retries).
+// A17 Stage 4 + stretch — /normalize: real timeout + retry policy +
+// cost logging + kill switch + token-limit pre-check (all in
+// normalize.js). 400 for oversized input (rejected before any model
+// call), 422 for a bad model answer, 504 for a dependency failure.
 // ----------------------------------------------------------------------
 app.post("/normalize", async (req, res) => {
     const parsed = NormalizeInputSchema.safeParse(req.body);
@@ -115,6 +116,9 @@ app.post("/normalize", async (req, res) => {
         const result = await normalize(text);
         return res.json(result);
     } catch (err) {
+        if (err.isTokenLimitError) {
+            return res.status(400).json({ error: err.message });
+        }
         if (err.isQuarantineFailure) {
             return res.status(422).json({ error: "Could not produce a valid result for this input" });
         }
